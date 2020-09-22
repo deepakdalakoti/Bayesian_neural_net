@@ -31,17 +31,17 @@ class TurbNN(th.nn.Module):
         super(TurbNN, self).__init__()
         self.linear1 = th.nn.Linear(D_in, H)
         self.f1 = th.nn.LeakyReLU()
-        self.linear2 = th.nn.Linear(H, H)
-        self.f2 = th.nn.LeakyReLU()
-        self.linear3 = th.nn.Linear(H, H)
-        self.f3 = th.nn.LeakyReLU()
-        self.linear4 = th.nn.Linear(H, H)
-        self.f4 = th.nn.LeakyReLU()
-        self.linear5 = th.nn.Linear(H, int(H/5))
+        #self.linear2 = th.nn.Linear(H, H)
+        #self.f2 = th.nn.ReLU()
+        #self.linear3 = th.nn.Linear(H, H)
+        #self.f3 = th.nn.ReLU()
+        #self.linear4 = th.nn.Linear(H, H)
+        #self.f4 = th.nn.ReLU()
+        self.linear5 = th.nn.Linear(H, int(H/2))
         self.f5 = th.nn.LeakyReLU()
-        self.linear6 = th.nn.Linear(int(H/5), int(H/10))
+        self.linear6 = th.nn.Linear(int(H/2), int(H/2))
         self.f6 = th.nn.LeakyReLU()
-        self.linear7 = th.nn.Linear(int(H/10), D_out)
+        self.linear7 = th.nn.Linear(int(H/2), D_out)
 
     def forward(self, x):
         """
@@ -52,13 +52,12 @@ class TurbNN(th.nn.Module):
             out (th.DoubleTensor): [N x D_out] matrix of neural network outputs
         """
         lin1 = self.f1(self.linear1(x))
-        lin2 = self.f2(self.linear2(lin1))
-        lin3 = self.f3(self.linear3(lin2))
-        lin4 = self.f4(self.linear4(lin3))
-        lin5 = self.f5(self.linear5(lin4))
+        #lin2 = self.f2(self.linear2(lin1))
+        #lin3 = self.f3(self.linear3(lin2))
+        #lin4 = self.f4(self.linear4(lin1))
+        lin5 = self.f5(self.linear5(lin1))
         lin6 = self.f6(self.linear6(lin5))
         out = self.linear7(lin6)
-
         return out
 
     def reset_parameters(self):
@@ -67,5 +66,5 @@ class TurbNN(th.nn.Module):
         """
         for x in self.modules():
             if isinstance(x, th.nn.Linear):
-                x.weight.data = th.normal(th.zeros(x.weight.size()), th.zeros(x.weight.size())+0.2).type(dtype)
+                x.weight.data = th.normal(th.zeros(x.weight.size()), th.zeros(x.weight.size())+1.0).type(dtype)
                 x.bias.data = th.zeros(x.bias.size()).type(dtype)

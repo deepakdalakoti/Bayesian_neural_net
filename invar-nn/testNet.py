@@ -12,11 +12,16 @@ github: https://github.com/cics-nd/rans-uncertainty
 from utils.dataManager import DataManager
 from utils.log import Log
 from nn.foamSVGD import FoamSVGD
-
+import matplotlib.pyplot as plt
 import os
-
+import sys
+from sklearn.metrics import r2_score
+import numpy as np
 if __name__ == '__main__':
 
+
+    nparts = int(sys.argv[1])
+    training = int(sys.argv[2])
     # Initialize logger
     lg = Log()
 
@@ -28,12 +33,13 @@ if __name__ == '__main__':
     ransTimes = [60, 90, 60, 60, 60]
     lesTimes = [200, 1000, 250, 1700, 170]
     dataManager = DataManager(trainingDir, ransTimes, lesTimes)
-    
-    foamNN = FoamSVGD(20) # Number of SVGD particles
+        
+    foamNN = FoamSVGD(nparts) # Number of SVGD particles
     # Load pre-trained neural networks
     #foamNN.loadNeuralNet('./torchNets/foamNet')
     
     # First set up validation dataset
+    #foamNN.getTrainingPoints(dataManager, n_data=500, n_mb=256)
     #foamNN.getTestingPoints(dataManager, n_data=500, n_mb=256)
 
     XTdirs = ['../../IgnDelay/xdataTr']
@@ -41,24 +47,27 @@ if __name__ == '__main__':
     Xdirs = ['../../IgnDelay/xdataTe']
     Ydirs = ['../../IgnDelay/ydataTe']
 
-    n_mb=64
-    foamNN.getDataPoints(dataManager, XTdirs, YTdirs, Xdirs, Ydirs, stp=2, n_mb=n_mb)
-
-    lg.log('Batch size is ' + str(n_mb))
-    n = 1 # Number of training sets
-    n_data = [1000 for i in range(n)] # Number of data per training set
-    n_mb = [1024 for i in range(n)] # Mini-batch size
-    n_epoch = [100 for i in range(n)] # Number of epochs per training set
-
-    # Training loop
-    for i in range(n):
-        # Parse data and create data loaders
-        #foamNN.getTrainingPoints(dataManager, n_data = n_data[i], n_mb = n_mb[i])
-
-        lg.log('Training data-set number: '+str(i+1))
-        foamNN.train(n_epoch[i], gpu=False)
-        # Save neural networks
-        foamNN.saveNeuralNet('foamNet-0D')
 
 
-
+    foamNN.getDataPoints(dataManager, XTdirs, YTdirs, Xdirs, Ydirs, stp=1, n_mb=64)
+    foamNN.loadNeuralNet('torchNets/foamNet-0D')
+    print(foamNN.models[0])
+    mean, var, _ = foamNN.predict2(training,gpu=False)
+    if(training):
+        y_data = foamNN.trainingLoader.dataset.target_tensor
+        x_data = foamNN.trainingLoader.dataset.x_tensor
+    else:
+        y_data = foamNN.testingLoaders[0].dataset.target_tensor
+        x_data = foamNN.testingLoaders[0].dataset.x_tensor
+    print(x_data.shape)    
+    R2Score = np.zeros(y_data.shape[1])
+    for i in range(R2Score.shape[0]):
+        R2Score[i] = r2_score(y_data[:,i].detach().numpy(),mean[:,i].detach().numpy())
+    print(R2Score)
+    plt.figure()
+    plt.scatter(y_data[:,4].detach().numpy(),mean[:,4].detach().numpy(),marker='.')
+    #plt.ylim(-5,25)
+    plt.savefig('test-mean.png')
+    plt.clf()
+    plt.scatter(y_data[:,4].detach().numpy(),var[:,4].detach().numpy(),marker='.')
+    plt.savefig('test-var.png')

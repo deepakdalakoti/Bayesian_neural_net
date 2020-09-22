@@ -13,6 +13,7 @@ github: https://github.com/cics-nd/rans-uncertainty
 from utils.log import Log
 from utils.dataManager import DataManager
 from utils.foamNetDataSet import FoamNetDataset, PredictDataset
+from utils.foamNetDataSet2D import FoamNetDataset2D
 from fluid.invariant import Invariant
 from nn.turbnn import TurbNN
 
@@ -25,7 +26,7 @@ import numpy as np
 import torch as th
 import nn.nnUtils as nnUtils
 import torch.nn.functional as F
-
+import matplotlib.pyplot as plt
 # Default tensor datatype
 if th.cuda.is_available():
     dtype = th.cuda.DoubleTensor
@@ -49,7 +50,7 @@ class FoamSVGD():
         self.lg.info('Constructing neural network...')
 
         self.n_samples = n_samples # Number of SVGD particles
-        self.turb_nn = TurbNN(D_in=5, H=200, D_out=10).double() #Construct neural network        
+        self.turb_nn = TurbNN(D_in=9, H=32, D_out=8).double() #Construct neural network        
 
         # Create n_samples SVGD particles
         # This is done by deep copying the invariant nn
@@ -65,10 +66,17 @@ class FoamSVGD():
         # Student's t-distribution: w ~ St(w | mu=0, lambda=shape/rate, nu=2*shape)
         # See PRML by Bishop Page 103
         self.prior_w_shape = 1.0
-        self.prior_w_rate = 0.025
+        #self.prior_w_rate = 0.025
+        self.prior_w_rate = 0.5
+
+
         # noise variance: beta ~ Gamma(beta | shape, rate)
-        self.prior_beta_shape = 100
-        self.prior_beta_rate = 2e-4
+        #self.prior_beta_shape = 100
+        #self.prior_beta_rate = 2e-4
+        self.prior_beta_shape = 2
+        self.prior_beta_rate = 4.0
+
+
 
         # Now set up parameters for the noise hyper-prior
         beta_size = (self.n_samples, 1)
@@ -79,9 +87,9 @@ class FoamSVGD():
             self.models[i].log_beta = Parameter(th.Tensor(log_beta[i]).type(dtype))
 
         # Network weights learning weight
-        lr = 1e-5
+        lr = 1e-2
         # Output-wise noise learning weight
-        lr_noise=0.001
+        lr_noise=0.01
 
         # Construct individual optimizers and learning rate schedulers
         self.schedulers = []
@@ -90,11 +98,17 @@ class FoamSVGD():
             # Pre-pend output-wise noise to model parameter list
             parameters = [{'params': [self.models[i].log_beta], 'lr': lr_noise},
                   {'params': [p for n, p in self.models[i].named_parameters() if n!='log_beta']}]
+
+            #parameters = [{'params': [p for n, p in self.models[i].named_parameters() if n!='log_beta']}]
+
             # ADAM optimizer (minor weight decay)
-            optim = th.optim.Adam(parameters, lr=lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=0.01)
+            optim = th.optim.Adam(parameters, lr=lr, betas=(0.9, 0.999), eps=1e-07, weight_decay=0.01)
+            #optim = th.optim.Adam(parameters, lr=lr)
+
+
             # Decay learning weight on plateau, can adjust these parameters depending on data
             scheduler = ReduceLROnPlateau(optim, mode='min', factor=0.75, patience=3,
-                verbose=True, threshold=0.05, threshold_mode='rel', cooldown=5, min_lr=0, eps=1e-07)
+                verbose=True, threshold=0.001, threshold_mode='rel', cooldown=5, min_lr=0, eps=1e-07)
 
             self.optimizers.append(optim)
             self.schedulers.append(scheduler)
@@ -108,14 +122,15 @@ class FoamSVGD():
             t_data (Tensor): [nx10x3x3] tensor of linear independent tensore basis functions
         Return: out (Tensor): [nx3x3] tensor of predicted scaled anisotropic terms
         """
-        out_size = (3, 3)
+        #out_size = (3, 3)
+        out_size = (54)
         output = Variable(th.Tensor(
             self.n_samples, input.size(0), *out_size).type(dtype))
         for i in range(self.n_samples):
             output[i] = self.models[i].forward(input)
-            g_pred = self.models[i].forward(input)
-            g_pred0 = th.unsqueeze(th.unsqueeze(g_pred, 2), 3)
-            output[i] = th.sum(g_pred0*t_data,1)
+            #g_pred = self.models[i].forward(input)
+            #g_pred0 = th.unsqueeze(th.unsqueeze(g_pred, 2), 3)
+            #output[i] = th.sum(g_pred0*t_data,1)
         return output
 
     def compute_loss(self, output, target, index=None):
@@ -137,8 +152,13 @@ class FoamSVGD():
         else:
             # Log Gaussian likelihood 
             # See Eq. 18-19 in paper
-            log_likelihood = len(self.trainingLoader.dataset) / output.size(0) \
-                                * (-0.5 * self.models[index].log_beta.exp()
+            #log_likelihood = len(self.trainingLoader.dataset) / output.size(0) \
+            #                    * (-0.5 * self.models[index].log_beta.exp()
+            #                    * (target - output).pow(2).sum()
+            #                    + 0.5 * target.numel()
+            #                    * self.models[index].log_beta)
+
+            log_likelihood =    (-0.5 * self.models[index].log_beta.exp()
                                 * (target - output).pow(2).sum()
                                 + 0.5 * target.numel()
                                 * self.models[index].log_beta)
@@ -152,12 +172,20 @@ class FoamSVGD():
 
             # Log Gamma Output-wise noise prior
             # See Eq. 20 in paper
-            prior_log_beta = (self.prior_beta_shape * self.models[index].log_beta \
+            prior_log_beta = ((self.prior_beta_shape-1.0) * self.models[index].log_beta \
                         - self.models[index].log_beta.exp() * self.prior_beta_rate).sum()
 
             return log_likelihood + prior_ws + prior_log_beta, \
                    log_likelihood.data.item()
 
+    def compute_loss2(self, output, target, index=None):
+
+
+
+        log_likelihood =  (target - output).pow(2).sum()
+        return log_likelihood,   log_likelihood.data.item()
+
+ 
     def _squared_dist(self, X):
         """
         Computes the square distance for a set of vectors ||x1 - x2||.
@@ -218,15 +246,15 @@ class FoamSVGD():
             self.lg.info('CPU network training enabled')
 
         # Unique indexs of the symmetric deviatoric tensor
-        indx = Variable(th.LongTensor([0,1,2,4,5,8]), requires_grad=False)
-        if (gpu):
-            indx = indx.cuda()
+        #indx = Variable(th.LongTensor([0,1,2,4,5,8]), requires_grad=False)
+        #if (gpu):
+        #    indx = indx.cuda()
 
-        self.lg.warning('Starting NN training with a experiment size of '+str(self.n_data))
+        #self.lg.warning('Starting NN training with a experiment size of '+str(self.n_data))
         # store the joint probabilities
         for epoch in range(n_epoch):
 
-            if (epoch + 1) % 1 == 0:
+            if (epoch + 1) % 20 == 0:
                 self.lg.info('Running test samples...')
                 self.test(epoch, gpu=gpu)
 
@@ -234,15 +262,11 @@ class FoamSVGD():
             training_MNLL = 0.
             training_MSE = 0.
             # Mini-batch the training set
-            for batch_idx, (x_data, t_data, k_data, y_data) in enumerate(self.trainingLoader):
+            for batch_idx, (x_data, y_data) in enumerate(self.trainingLoader):
                 x_data = Variable(x_data)
-                t_data = Variable(t_data, requires_grad=False)
-                k_data = Variable(k_data.unsqueeze(0).unsqueeze(0).expand(3,3,k_data.size()[0]).permute(2, 0, 1).type(dtype), requires_grad=False)
                 y_data = Variable(y_data, requires_grad=False)
                 if (gpu):
                     x_data = x_data.cuda()
-                    t_data = t_data.cuda()
-                    k_data = k_data.cuda()
                     y_data = y_data.cuda()
 
                 # all gradients of log joint probability:
@@ -251,24 +275,18 @@ class FoamSVGD():
                 # all model parameters (particles): n_samples x num_parameters
                 theta = []
                 b_pred_tensor = Variable(th.Tensor(
-                    self.n_samples, x_data.size(0), 9).type(dtype), requires_grad=False)
+                    self.n_samples, x_data.size(0), y_data.shape[1]).type(dtype), requires_grad=False)
+
 
                 # Now iterate through each model
                 for i in range(self.n_samples):
                     self.models[i].zero_grad()
                     # Predict mixing coefficients -> g_pred [Nx10]
                     g_pred = self.models[i].forward(x_data)
-                    g_pred0 = th.unsqueeze(th.unsqueeze(g_pred, 2), 3)
+                    b_pred_tensor[i] = g_pred
+                    #b_pred = g_pred
 
-		            # Multiply by respective tensor basis functions [Nx10x1x1]*[Nx10x3x3]
-                    b_pred = th.sum(g_pred0[:,:,:,:]*t_data[:,:,:,:],1).view(-1,9)
-                    b_pred_tensor[i] = b_pred
-
-                    # For the loss since matrix is symmetric only select unique indices
-                    # This is just a trick to speed things up and equally weight all parameters
-                    b_pred = th.index_select(b_pred, 1, indx)
-                    y_target = th.index_select(y_data, 1, indx)
-                    loss, log_likelihood = self.compute_loss(b_pred, y_target, i)
+                    loss, log_likelihood = self.compute_loss(g_pred, y_data, i)
                     # backward to compute gradients of log joint probabilities
                     loss.backward()
                     # monitoring purpose
@@ -287,8 +305,11 @@ class FoamSVGD():
                 Kxx, dxKxx = self._Kxx_dxKxx(theta)
                 grad_log_joints = th.cat(grad_log_joints)
                 grad_logp = th.mm(Kxx, grad_log_joints)
+               
                 # Negate the gradients here
                 grad_theta = - (grad_logp + dxKxx) / self.n_samples
+
+
 
                 # update param gradients
                 for i in range(self.n_samples):
@@ -309,15 +330,112 @@ class FoamSVGD():
             ndata = len(self.trainingLoader.dataset)
             if (epoch + 1) % 1 == 0:
                 self.lg.log("===> Epoch: {}, Current loss: {:.6f} Log Beta: {:.6f} Scaled-MSE: {:.6f}".format(
-                    epoch + 1, training_loss, self.models[0].log_beta.data.item(), training_MSE/ndata))
-                    
+                    epoch + 1, training_loss, self.models[0].log_beta.data.item(), training_MSE/(ndata*y_data.shape[1])))
                 self.lg.logLoss(epoch, training_loss/(ndata*self.n_samples), \
                     training_MNLL/(ndata*self.n_samples), training_MSE/ndata)
             
             # Update learning rate if needed
             for i in range(self.n_samples):
                 self.schedulers[i].step(abs(training_loss))
-    
+
+    def train2(self, x_data, y_data,  n_epoch=250, gpu=True):
+        """
+        Training the neural network(s) using SVGD
+        Args:
+            n_epoch (int): Number of epochs to train for
+            gpu (boolean): Whether or not to use a GPU (default is true)
+        """
+        
+        if(gpu):
+            self.lg.info('GPU network training enabled')
+            #Transfer network and training data onto GPU
+            for i in range(self.n_samples):
+                    self.models[i].cuda()
+        else:
+            self.lg.info('CPU network training enabled')
+
+        # Unique indexs of the symmetric deviatoric tensor
+        #indx = Variable(th.LongTensor([0,1,2,4,5,8]), requires_grad=False)
+        #if (gpu):
+        #    indx = indx.cuda()
+
+        #self.lg.warning('Starting NN training with a experiment size of '+str(self.n_data))
+        # store the joint probabilities
+        x_data = th.from_numpy(x_data)
+        y_data = th.from_numpy(y_data)
+        for epoch in range(n_epoch):
+
+                if (epoch + 1) % 20 == 0:
+                    self.lg.info('Running test samples...')
+                    self.test(epoch, gpu=gpu)
+
+                training_loss = 0.
+                training_MNLL = 0.
+                training_MSE = 0.
+                # Mini-batch the training set
+                x_data = Variable(x_data)
+                y_data = Variable(y_data, requires_grad=False)
+                if (gpu):
+                    x_data = x_data.cuda()
+                    y_data = y_data.cuda()
+
+                # all gradients of log joint probability:
+                # n_samples x num_parameters
+                grad_log_joints = []
+                # all model parameters (particles): n_samples x num_parameters
+                theta = []
+                b_pred_tensor = Variable(th.Tensor(
+                    self.n_samples, x_data.size(0), y_data.shape[1]).type(dtype), requires_grad=False)
+
+
+                # Now iterate through each model
+                for i in range(self.n_samples):
+                    self.models[i].zero_grad()
+                    # Predict mixing coefficients -> g_pred [Nx10]
+                    g_pred = self.models[i].forward(x_data)
+                    b_pred_tensor[i] = g_pred
+                    #b_pred = g_pred
+
+                    loss, log_likelihood = self.compute_loss(g_pred, y_data, i)
+                    # backward to compute gradients of log joint probabilities
+                    loss.backward()
+                    # monitoring purpose
+                    training_loss += loss.data.item()
+                    training_MNLL += log_likelihood
+
+                    # Extract parameters and their gradients out from models
+                    vec_param, vec_grad_log_joint = nnUtils.parameters_to_vector(
+                        self.models[i].parameters(), both=True)
+
+                    grad_log_joints.append(vec_grad_log_joint.unsqueeze(0))
+                    theta.append(vec_param.unsqueeze(0))
+
+                # calculating the kernel matrix and its gradients
+                theta = th.cat(theta)
+                Kxx, dxKxx = self._Kxx_dxKxx(theta)
+                grad_log_joints = th.cat(grad_log_joints)
+                grad_logp = th.mm(Kxx, grad_log_joints)
+               
+                # Negate the gradients here
+                grad_theta = - (grad_logp + dxKxx) / self.n_samples
+
+
+
+                # update param gradients
+                for i in range(self.n_samples):
+                    nnUtils.vector_to_parameters(grad_theta[i], self.models[i].parameters(), grad=True)
+                    self.optimizers[i].step()
+                del grad_theta
+
+                # Scaled MSE
+                training_MSE += ((y_data - b_pred_tensor.mean(0)) ** 2).sum(1).sum(0).data.item()
+
+            # Update learning rate if needed
+                for i in range(self.n_samples):
+                    self.schedulers[i].step(abs(training_loss))
+
+
+ 
     def test(self, epoch, gpu=True):
         """
         Tests the neural network(s) on validation/testing datasets
@@ -332,9 +450,9 @@ class FoamSVGD():
             return
                   
         # Unique indexs of the symmetric deviatoric tensor
-        indx = Variable(th.LongTensor([0,1,2,4,5,8]), requires_grad=False)
-        if (gpu):
-            indx = indx.cuda()
+        #indx = Variable(th.LongTensor([0,1,2,4,5,8]), requires_grad=False)
+        #if (gpu):
+        #    indx = indx.cuda()
 
         # Switch models to eval state (shuts off dropout)
         for i in range(self.n_samples):
@@ -343,38 +461,41 @@ class FoamSVGD():
         # Mini-batch the training set
         flow_mspe = np.zeros(len(self.testingLoaders))
         flow_mnll = np.zeros(len(self.testingLoaders))
+        #print("flow_mnll shape ", flow_mnll.shape)
         for n, testingLoader in enumerate(self.testingLoaders):
             net_mse = 0
             testing_MNLL = 0
-            for batch_idx, (x_data, t_data, k_data, y_data) in enumerate(testingLoader):
+            for batch_idx, (x_data, y_data) in enumerate(testingLoader):
+                #self.lg.info("Testing batch " + str(batch_idx))
                 # Make mini-batch data variables
                 x_data = Variable(x_data)
-                t_data = Variable(t_data, requires_grad=False)
-                k_data = Variable(k_data.unsqueeze(0).unsqueeze(0).expand(3,3,k_data.size()[0]).permute(2, 0, 1).type(dtype), requires_grad=False)
+                #t_data = Variable(t_data, requires_grad=False)
+                #k_data = Variable(k_data.unsqueeze(0).unsqueeze(0).expand(3,3,k_data.size()[0]).permute(2, 0, 1).type(dtype), requires_grad=False)
                 y_data = Variable(y_data, requires_grad=False)
                 if (gpu):
                     x_data = x_data.cuda()
-                    t_data = t_data.cuda()
-                    k_data = k_data.cuda()
+                    #t_data = t_data.cuda()
+                    #k_data = k_data.cuda()
                     y_data = y_data.cuda()
 
                 b_pred = Variable(th.Tensor(
-                    self.n_samples, x_data.size(0), 9).type(dtype))
+                    self.n_samples, x_data.size(0), y_data.shape[1]).type(dtype))
 
                 # Now iterate through each SVGD particle (invariant nn)
                 for i in range(self.n_samples):
                     self.models[i].zero_grad()
                     g_pred = self.models[i].forward(x_data)
-                    g_pred0 = th.unsqueeze(th.unsqueeze(g_pred, 2), 3)
-                    b_pred[i] = th.sum(g_pred0[:,:,:,:]*t_data[:,:,:,:],1).view(-1,9)
+                    #g_pred0 = th.unsqueeze(th.unsqueeze(g_pred, 2), 3)
+                    #b_pred[i] = th.sum(g_pred0[:,:,:,:]*t_data[:,:,:,:],1).view(-1,9)
+                    b_pred[i] = g_pred
                     # For the loss since matrix is symmetric only select unique indices
-                    loss, log_likelihood = self.compute_loss(th.index_select(b_pred[i],1,  indx), th.index_select(y_data, 1, indx), i)
+                    loss, log_likelihood = self.compute_loss(b_pred[i], y_data, i)
                     testing_MNLL += log_likelihood
 
                 # MSE of unscaled anisotropic tensor a = k*b
                 # This is used as a metric since a is used in the RANS equations
                 # Thus measuring the MSE of b would be bias
-                mse = (th.index_select(k_data.view(-1,9)*(y_data - b_pred.mean(0)), 1, indx) ** 2).sum()
+                mse = ((y_data - b_pred) ** 2).sum()
                 net_mse += mse.data.item()
 
             # Total amount of testing data
@@ -384,8 +505,114 @@ class FoamSVGD():
 
         # Log testing results
         self.lg.log("===> Current Total Validation Loss: {}, Validation MSE: {}" \
-                .format(flow_mnll.sum(0)/ndata, flow_mspe.sum(0)))
+                .format(flow_mnll.sum(0)/ndata,flow_mspe.sum(0)))
         self.lg.logTest(epoch, flow_mnll, flow_mspe)
+        return b_pred
+
+    def predict2(self, trainS=True, gpu=True):
+        """
+        Tests the neural network(s) on validation/testing datasets
+        Args:
+            n_epoch (int): current epoch (just used for logging purposes)
+            gpu (boolean): Whether or not to use a GPU (default is true)
+        """
+        try:
+            self.testingLoaders
+        except:
+            self.lg.error('Testing data loader not created! Stopping testing')
+            return
+                  
+
+        # Switch models to eval state (shuts off dropout)
+        for i in range(self.n_samples):
+            self.models[i].eval()
+        if(trainS):
+            y_data = self.trainingLoader.dataset.target_tensor
+            x_data = self.trainingLoader.dataset.x_tensor
+            b_mean = th.Tensor(x_data.shape[0],y_data.shape[1]).type(th.DoubleTensor)
+            b_var  = th.Tensor(x_data.shape[0],y_data.shape[1]).type(th.DoubleTensor)
+
+        else:
+            x_data = self.testingLoaders[0].dataset.x_tensor
+            y_data = self.testingLoaders[0].dataset.target_tensor
+            b_mean = th.Tensor(x_data.shape[0],y_data.shape[1]).type(th.DoubleTensor)
+            b_var  = th.Tensor(x_data.shape[0],y_data.shape[1]).type(th.DoubleTensor)
+
+        if(gpu):   
+            x_data = x_data.cuda()
+            #y_data = y_data.cuda() 
+
+        predict=Variable(th.Tensor(
+                    self.n_samples, x_data.size(0), y_data.shape[1]).type(dtype), requires_grad=False)
+
+
+        for i in range(self.n_samples):
+            predict[i] = self.models[i].forward(x_data)
+
+        eyyt = (predict.data ** 2).mean(0)
+        eyeyt = predict.mean(0).data ** 2
+        beta_inv = th.cat([(-self.models[i].log_beta.data).exp().unsqueeze(0) for i in range(self.n_samples)])
+        y_noise_var = beta_inv.mean(0)
+        var = eyyt.cpu() - eyeyt.cpu() 
+        var_noise =  y_noise_var.cpu()
+
+
+        meanPred = predict.mean(0)
+
+        return meanPred.cpu(), var, var_noise
+
+    def predict3(self, gpu=True):
+
+        # Switch models to eval state (shuts off dropout)
+        for i in range(self.n_samples):
+            self.models[i].eval()
+        
+        if(gpu):
+            self.lg.info('GPU network training enabled')
+            #Transfer network and training data onto GPU
+            for i in range(self.n_samples):
+                    self.models[i].cuda()
+        else:
+            self.lg.info('CPU network training enabled')
+
+        # Note we store the mean and variance fields on the CPU since the fluid field may be very larges
+        # Mini-batches are then brought onto the GPU from forward passes.
+        x_data = self.trainingLoader.dataset.x_tensor
+        b_mean = th.Tensor(x_data.size(0), 1).type(th.DoubleTensor)
+        targ = th.Tensor(x_data.size(0), 1).type(th.DoubleTensor)
+        b_var = th.Tensor(x_data.size(0), 1).type(th.DoubleTensor)
+        b_index = 0
+        # Mini-batch the pred
+        for batch_idx, (x_data, t_data) in enumerate(self.trainingLoader):
+            x_data = Variable(x_data, requires_grad=False)
+            t_data = Variable(t_data, requires_grad=False)
+            if (gpu):
+                x_data = x_data.cuda()
+                t_data = t_data.cuda()
+
+            b_pred = Variable(th.Tensor(
+                self.n_samples, x_data.size(0), 1).type(dtype))
+
+            # Now iterate through each model
+            for i in range(self.n_samples):
+                self.models[i].zero_grad()
+                g_pred = self.models[i].forward(x_data)
+                b_pred[i] = g_pred
+                
+            # Compute expectation (Eq. 30 in paper)
+            b_mean[b_index:b_index+x_data.size(0)] = b_pred.mean(0).data.cpu()
+            targ[b_index:b_index+x_data.size(0)] = t_data
+            # Compute variance of each output  (Eq. 31 in paper)
+            b_eyyt = (b_pred.data ** 2).mean(0)
+            b_eyeyt = b_pred.mean(0).data ** 2
+            beta_inv = th.cat([(-self.models[i].log_beta.data).exp().unsqueeze(0) for i in range(self.n_samples)])
+            y_noise_var = beta_inv.mean(0).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+            b_var[b_index:b_index+x_data.size(0)] = b_eyyt.cpu() - b_eyeyt.cpu() + y_noise_var.cpu()
+            # Step index
+            b_index += x_data.size(0)
+
+        return b_mean, targ
+
 
     def predict(self, ransS, ransR, n_mb=200, gpu=True):
         """
@@ -456,6 +683,60 @@ class FoamSVGD():
 
         return b_mean, b_var
 
+    def getDataPoints(self, dataManager, XTrdirs, YTrdirs, Xdirs, Ydirs, stp=10, n_mb = 250):
+        """ 
+        Used for creating training and also validation datasets
+        Args: dataManager: dataManager object for loading openFoam data
+              n_data: total number of training/ validation data to use
+              n_mb: size of minibatch
+              n_valid: number of points to use as validation for current dataset
+        """
+        self.lg.info('Creating data-sets')
+        self.n_mb = n_mb
+
+        # Get the set of training points from the data manager
+        #x0, t0, k0, y0 = dataManager.getDataPoints(self, n_data)
+        x_train, y_train = dataManager.getDataPoints2D(XTrdirs[0],YTrdirs[0],stp)
+        x_test, y_test   = dataManager.getDataPoints2D(Xdirs[0],Ydirs[0],stp)
+            
+        for i in range(1,len(XTrdirs)):
+            x, y = dataManager.getDataPoints2D(XTrdirs[i],YTrdirs[i],stp)
+            x_train = np.append(x_train,x,axis=0)
+            y_train = np.append(y_train,y,axis=0)
+
+        for i in range(1,len(Xdirs)):
+            x, y = dataManager.getDataPoints2D(Xdirs[i],Ydirs[i],stp)
+            x_test = np.append(x_train,x,axis=0)
+            y_test = np.append(y_train,y,axis=0)
+        #cns = x_train[0,0]
+        #cns2 = x_test[0,0]
+        x_train, x_test = dataManager.do_normalization(x_train, x_test, 'std')
+        y_train, y_test = dataManager.do_normalization(y_train, y_test, 'std')
+        #x_train[:,0] = cns
+        #x_train[:,1] = 0.0
+
+        #x_test[:,0] = cns2
+        #x_test[:,1] = 0.0
+
+        #y_train[:,[0,1]] = 0.0
+        #y_test[:,[0,1]] = 0.0
+        
+        x_train = th.from_numpy(x_train).double()
+        x_test  = th.from_numpy(x_test).double()
+        y_train = th.from_numpy(y_train).double()
+        y_test  = th.from_numpy(y_test).double()
+    
+        # Create data sets
+        self.trainingDataSet = FoamNetDataset2D(x_train, y_train)
+        # Now create loaders (set mini-batch size and also turn on shuffle)
+        self.trainingLoader = th.utils.data.DataLoader(self.trainingDataSet, batch_size=n_mb, shuffle=False)
+        self.testingLoaders = []
+        # Create data sets
+        self.testingDataSet = FoamNetDataset2D(x_test, y_test)
+        # Now create loaders (set mini-batch size and also turn on shuffle)
+        self.testingLoaders.append(th.utils.data.DataLoader(self.testingDataSet, batch_size=n_mb, shuffle=False))
+
+
     def getTrainingPoints(self, dataManager, n_data = 5000, n_mb = 250, n_valid=0):
         """ 
         Used for creating training and also validation datasets
@@ -469,23 +750,26 @@ class FoamSVGD():
         self.n_mb = n_mb
 
         # Get the set of training points from the data manager
-        x0, t0, k0, y0 = dataManager.getDataPoints(self, n_data)
+        #x0, t0, k0, y0 = dataManager.getDataPoints(self, n_data)
+        x_train, y_train = dataManager.getDataPoints2D( './RR_data/data2d_lower2.bin', \
+                           './RR_data/reac2d_lower2.bin')
+
 
         # Randomly permute the read data 
-        perm0 = th.randperm(n_data)
-        x0 = x0[perm0]
-        t0 = t0[perm0]
-        k0 = k0[perm0]
-        y0 = y0[perm0]
+        #perm0 = th.randperm(n_data)
+        #x0 = x0[perm0]
+        #t0 = t0[perm0]
+        #k0 = k0[perm0]
+        #y0 = y0[perm0]
 
         # Set training and test data
-        x_train = x0[n_valid:]
-        t_train = t0[n_valid:]
-        k_train = k0[n_valid:]
-        y_train = y0[n_valid:]
+        #x_train = x0[n_valid:]
+        #t_train = t0[n_valid:]
+        #k_train = k0[n_valid:]
+        #y_train = y0[n_valid:]
     
         # Create data sets
-        self.trainingDataSet = FoamNetDataset(x_train, t_train, k_train, y_train)
+        self.trainingDataSet = FoamNetDataset2D(x_train, y_train)
         # Now create loaders (set mini-batch size and also turn on shuffle)
         self.trainingLoader = th.utils.data.DataLoader(self.trainingDataSet, batch_size=n_mb, shuffle=True)
 
@@ -524,10 +808,11 @@ class FoamSVGD():
 
         # Get the set of testing points from the data manager
         # Note turn mask -> True so these points are not used during training
-        x_test, t_test, k_test, y_test = dataManager.getDataPoints(self, n_data, mask=True)
-
+        x_test,  y_test = dataManager.getDataPoints2DTest('./RR_data/data2d_lower2.bin', \
+                                      './RR_data/reac2d_lower2.bin','./RR_data/data2d_base.bin', \
+                                      './RR_data/reac2d_base.bin')
         # Create data sets
-        self.testingDataSet = FoamNetDataset(x_test, t_test, k_test, y_test)
+        self.testingDataSet = FoamNetDataset2D(x_test, y_test)
         # Now create test loaders
         self.testingLoaders.append(th.utils.data.DataLoader(self.testingDataSet, batch_size=n_mb, shuffle=True))
 
