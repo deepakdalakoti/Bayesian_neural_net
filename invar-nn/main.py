@@ -29,7 +29,7 @@ if __name__ == '__main__':
     lesTimes = [200, 1000, 250, 1700, 170]
     dataManager = DataManager(trainingDir, ransTimes, lesTimes)
     
-    foamNN = FoamSVGD(20) # Number of SVGD particles
+    foamNN = FoamSVGD(80) # Number of SVGD particles
     # Load pre-trained neural networks
     #foamNN.loadNeuralNet('./torchNets/foamNet')
     
@@ -48,7 +48,7 @@ if __name__ == '__main__':
     n = 1 # Number of training sets
     n_data = [1000 for i in range(n)] # Number of data per training set
     n_mb = [1024 for i in range(n)] # Mini-batch size
-    n_epoch = [100 for i in range(n)] # Number of epochs per training set
+    n_epoch = [150 for i in range(n)] # Number of epochs per training set
 
     # Training loop
     for i in range(n):
@@ -56,7 +56,7 @@ if __name__ == '__main__':
         #foamNN.getTrainingPoints(dataManager, n_data = n_data[i], n_mb = n_mb[i])
 
         lg.log('Training data-set number: '+str(i+1))
-        foamNN.train(n_epoch[i], gpu=False)
+        foamNN.train(n_epoch[i], gpu=True)
         # Save neural networks
         foamNN.saveNeuralNet('foamNet-0D')
 

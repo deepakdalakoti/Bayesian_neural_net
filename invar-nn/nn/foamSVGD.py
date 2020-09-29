@@ -123,7 +123,7 @@ class FoamSVGD():
         Return: out (Tensor): [nx3x3] tensor of predicted scaled anisotropic terms
         """
         #out_size = (3, 3)
-        out_size = (54)
+        out_size = (8)
         output = Variable(th.Tensor(
             self.n_samples, input.size(0), *out_size).type(dtype))
         for i in range(self.n_samples):
@@ -152,16 +152,16 @@ class FoamSVGD():
         else:
             # Log Gaussian likelihood 
             # See Eq. 18-19 in paper
-            #log_likelihood = len(self.trainingLoader.dataset) / output.size(0) \
-            #                    * (-0.5 * self.models[index].log_beta.exp()
-            #                    * (target - output).pow(2).sum()
-            #                    + 0.5 * target.numel()
-            #                    * self.models[index].log_beta)
-
-            log_likelihood =    (-0.5 * self.models[index].log_beta.exp()
+            log_likelihood = len(self.trainingLoader.dataset) / output.size(0) \
+                                * (-0.5 * self.models[index].log_beta.exp()
                                 * (target - output).pow(2).sum()
                                 + 0.5 * target.numel()
                                 * self.models[index].log_beta)
+
+            #log_likelihood =    (-0.5 * self.models[index].log_beta.exp()
+            #                    * (target - output).pow(2).sum()
+            #                    + 0.5 * target.numel()
+            #                    * self.models[index].log_beta)
 
             # Log Gaussian weight prior
             # See Eq. 17 in paper
@@ -338,7 +338,7 @@ class FoamSVGD():
             for i in range(self.n_samples):
                 self.schedulers[i].step(abs(training_loss))
 
-    def train2(self, x_data, y_data,  n_epoch=250, gpu=True):
+    def train2(self, x_data, y_data,  nb=1, n_epoch=1, gpu=True):
         """
         Training the neural network(s) using SVGD
         Args:
@@ -363,15 +363,20 @@ class FoamSVGD():
         # store the joint probabilities
         x_data = th.from_numpy(x_data)
         y_data = th.from_numpy(y_data)
+        self.trainingLoader = th.utils.data.DataLoader(FoamNetDataset2D(x_data,y_data), batch_size=nb, shuffle=True)
+        for i in range(self.n_samples):
+            self.models[i].train()
+
         for epoch in range(n_epoch):
 
-                if (epoch + 1) % 20 == 0:
-                    self.lg.info('Running test samples...')
-                    self.test(epoch, gpu=gpu)
+            #if (epoch + 1) % 20 == 0:
+            #    self.lg.info('Running test samples...')
+            #    self.test(epoch, gpu=gpu)
 
-                training_loss = 0.
-                training_MNLL = 0.
-                training_MSE = 0.
+            training_loss = 0.
+            training_MNLL = 0.
+            training_MSE = 0.
+            for batch_idx, (x_data, y_data) in enumerate(self.trainingLoader):
                 # Mini-batch the training set
                 x_data = Variable(x_data)
                 y_data = Variable(y_data, requires_grad=False)
@@ -431,9 +436,16 @@ class FoamSVGD():
                 training_MSE += ((y_data - b_pred_tensor.mean(0)) ** 2).sum(1).sum(0).data.item()
 
             # Update learning rate if needed
-                for i in range(self.n_samples):
-                    self.schedulers[i].step(abs(training_loss))
+            for i in range(self.n_samples):
+                self.schedulers[i].step(abs(training_loss))
 
+            ndata = len(self.trainingLoader.dataset)
+            if (epoch + 1) % 1 == 0:
+                self.lg.log("===> Epoch: {}, Current loss: {:.6f} Log Beta: {:.6f} Scaled-MSE: {:.6f}".format(
+                    epoch + 1, training_loss, self.models[0].log_beta.data.item(), training_MSE/(ndata*y_data.shape[1])))
+                self.lg.logLoss(epoch, training_loss/(ndata*self.n_samples), \
+                    training_MNLL/(ndata*self.n_samples), training_MSE/ndata)
+            
 
  
     def test(self, epoch, gpu=True):
