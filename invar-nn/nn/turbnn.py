@@ -11,7 +11,7 @@ github: https://github.com/cics-nd/rans-uncertainty
 '''
 import torch as th
 import torch.nn.functional as F
-
+import numpy as np
 if th.cuda.is_available():
     dtype = th.cuda.DoubleTensor
 else:
@@ -32,16 +32,16 @@ class TurbNN(th.nn.Module):
         self.linear1 = th.nn.Linear(D_in, H)
         self.f1 = th.nn.LeakyReLU()
         #self.linear2 = th.nn.Linear(H, H)
-        #self.f2 = th.nn.ReLU()
+        #self.f2 = th.nn.LeakyReLU()
         #self.linear3 = th.nn.Linear(H, H)
-        #self.f3 = th.nn.ReLU()
-        #self.linear4 = th.nn.Linear(H, H)
-        #self.f4 = th.nn.ReLU()
-        self.linear5 = th.nn.Linear(H, int(H/2))
+        #self.f3 = th.nn.LeakyReLU()
+        self.linear4 = th.nn.Linear(H, H)
+        self.f4 = th.nn.LeakyReLU()
+        self.linear5 = th.nn.Linear(H, H)
         self.f5 = th.nn.LeakyReLU()
-        self.linear6 = th.nn.Linear(int(H/2), int(H/2))
+        self.linear6 = th.nn.Linear(H, H)
         self.f6 = th.nn.LeakyReLU()
-        self.linear7 = th.nn.Linear(int(H/2), D_out)
+        self.linear7 = th.nn.Linear(H, D_out)
 
     def forward(self, x):
         """
@@ -54,13 +54,13 @@ class TurbNN(th.nn.Module):
         lin1 = self.f1(self.linear1(x))
         #lin2 = self.f2(self.linear2(lin1))
         #lin3 = self.f3(self.linear3(lin2))
-        #lin4 = self.f4(self.linear4(lin1))
-        lin5 = self.f5(self.linear5(lin1))
+        lin4 = self.f4(self.linear4(lin1))
+        lin5 = self.f5(self.linear5(lin4))
         lin6 = self.f6(self.linear6(lin5))
         out = self.linear7(lin6)
         return out
 
-    def reset_parameters(self):
+    def reset_parameters2(self):
         """
         Resets the weights of the neural network, samples from a normal guassian.
         """
@@ -68,3 +68,16 @@ class TurbNN(th.nn.Module):
             if isinstance(x, th.nn.Linear):
                 x.weight.data = th.normal(th.zeros(x.weight.size()), th.zeros(x.weight.size())+1.0).type(dtype)
                 x.bias.data = th.zeros(x.bias.size()).type(dtype)
+
+    def reset_parameters(self, shape, rate):
+        """
+        Sample from student t distribution 
+        """
+        m=th.distributions.studentT.StudentT(2.0*shape)
+        transforms = [th.distributions.transforms.AffineTransform(loc=0.0, scale=np.sqrt(rate/shape))]
+        m2 = th.distributions.transformed_distribution.TransformedDistribution(m,transforms)
+        for x in self.modules():
+            if isinstance(x,th.nn.Linear):
+                x.weight.data = m2.sample(x.weight.size()).type(dtype)
+                x.bias.data = m2.sample(x.bias.size()).type(dtype)
+

@@ -45,36 +45,38 @@ class FoamSVGD():
         Advances In Neural Information Processing Systems. 2016.
     
     """
-    def __init__(self, n_samples):
+    def __init__(self, n_samples, H):
         self.lg = Log()
         self.lg.info('Constructing neural network...')
 
         self.n_samples = n_samples # Number of SVGD particles
-        self.turb_nn = TurbNN(D_in=9, H=32, D_out=8).double() #Construct neural network        
+        self.turb_nn = TurbNN(D_in=9, H=H, D_out=9).double() #Construct neural network        
+
+        # Student's t-distribution: w ~ St(w | mu=0, lambda=shape/rate, nu=2*shape)
+        # See PRML by Bishop Page 103
+        self.prior_w_shape = 1.0
+        self.prior_w_rate = 0.02
+        #self.prior_w_rate = 0.5
+
+
+        # noise variance: beta ~ Gamma(beta | shape, rate)
+        self.prior_beta_shape = 100
+        #self.prior_beta_rate = 2e-4
+        #self.prior_beta_shape = 2.0
+        self.prior_beta_rate = 4.0
+
+
 
         # Create n_samples SVGD particles
         # This is done by deep copying the invariant nn
         instances = []
         for i in range(n_samples):
             new_instance = copy.deepcopy(self.turb_nn)
-            new_instance.reset_parameters() # Reset parameters to spread particles out
+            new_instance.reset_parameters(self.prior_w_shape,self.prior_w_rate) # Reset parameters to spread particles out
             instances.append(new_instance)
 
         self.models = th.nn.ModuleList(instances)
         del instances
-
-        # Student's t-distribution: w ~ St(w | mu=0, lambda=shape/rate, nu=2*shape)
-        # See PRML by Bishop Page 103
-        self.prior_w_shape = 1.0
-        #self.prior_w_rate = 0.025
-        self.prior_w_rate = 0.5
-
-
-        # noise variance: beta ~ Gamma(beta | shape, rate)
-        #self.prior_beta_shape = 100
-        #self.prior_beta_rate = 2e-4
-        self.prior_beta_shape = 2
-        self.prior_beta_rate = 4.0
 
 
 
@@ -87,28 +89,28 @@ class FoamSVGD():
             self.models[i].log_beta = Parameter(th.Tensor(log_beta[i]).type(dtype))
 
         # Network weights learning weight
-        lr = 1e-2
+        self.lr = 1e-2
         # Output-wise noise learning weight
-        lr_noise=0.01
+        self.lr_noise=0.01
 
         # Construct individual optimizers and learning rate schedulers
         self.schedulers = []
         self.optimizers = []
         for i in range(n_samples):
             # Pre-pend output-wise noise to model parameter list
-            parameters = [{'params': [self.models[i].log_beta], 'lr': lr_noise},
+            parameters = [{'params': [self.models[i].log_beta], 'lr': self.lr_noise},
                   {'params': [p for n, p in self.models[i].named_parameters() if n!='log_beta']}]
 
             #parameters = [{'params': [p for n, p in self.models[i].named_parameters() if n!='log_beta']}]
 
             # ADAM optimizer (minor weight decay)
-            optim = th.optim.Adam(parameters, lr=lr, betas=(0.9, 0.999), eps=1e-07, weight_decay=0.01)
+            optim = th.optim.Adam(parameters, lr=self.lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=0.0)
             #optim = th.optim.Adam(parameters, lr=lr)
 
 
             # Decay learning weight on plateau, can adjust these parameters depending on data
-            scheduler = ReduceLROnPlateau(optim, mode='min', factor=0.75, patience=3,
-                verbose=True, threshold=0.001, threshold_mode='rel', cooldown=5, min_lr=0, eps=1e-07)
+            scheduler = ReduceLROnPlateau(optim, mode='min', factor=0.75, patience=5,
+                verbose=True, threshold=0.01, threshold_mode='abs', cooldown=0, min_lr=0, eps=1e-07)
 
             self.optimizers.append(optim)
             self.schedulers.append(scheduler)
@@ -123,7 +125,7 @@ class FoamSVGD():
         Return: out (Tensor): [nx3x3] tensor of predicted scaled anisotropic terms
         """
         #out_size = (3, 3)
-        out_size = (8)
+        out_size = (9)
         output = Variable(th.Tensor(
             self.n_samples, input.size(0), *out_size).type(dtype))
         for i in range(self.n_samples):
@@ -328,17 +330,18 @@ class FoamSVGD():
 
             # Log training loss, MNLL, and mean mse
             ndata = len(self.trainingLoader.dataset)
+
             if (epoch + 1) % 1 == 0:
                 self.lg.log("===> Epoch: {}, Current loss: {:.6f} Log Beta: {:.6f} Scaled-MSE: {:.6f}".format(
-                    epoch + 1, training_loss, self.models[0].log_beta.data.item(), training_MSE/(ndata*y_data.shape[1])))
+                    epoch + 1, training_loss, self.models[0].log_beta.data.item(), training_MSE/(ndata)))
                 self.lg.logLoss(epoch, training_loss/(ndata*self.n_samples), \
-                    training_MNLL/(ndata*self.n_samples), training_MSE/ndata)
+                    training_MNLL/(ndata*self.n_samples), training_MSE/ndata, self.extra)
             
             # Update learning rate if needed
             for i in range(self.n_samples):
                 self.schedulers[i].step(abs(training_loss))
 
-    def train2(self, x_data, y_data,  nb=1, n_epoch=1, gpu=True):
+    def train2(self, x_dataTr, y_dataTr,  nb=1, n_epoch=1, gpu=True):
         """
         Training the neural network(s) using SVGD
         Args:
@@ -361,9 +364,9 @@ class FoamSVGD():
 
         #self.lg.warning('Starting NN training with a experiment size of '+str(self.n_data))
         # store the joint probabilities
-        x_data = th.from_numpy(x_data)
-        y_data = th.from_numpy(y_data)
-        self.trainingLoader = th.utils.data.DataLoader(FoamNetDataset2D(x_data,y_data), batch_size=nb, shuffle=True)
+        x_dataTr = th.from_numpy(x_dataTr)
+        y_dataTr = th.from_numpy(y_dataTr)
+        self.trainingLoader = th.utils.data.DataLoader(FoamNetDataset2D(x_dataTr,y_dataTr), batch_size=nb, shuffle=True)
         for i in range(self.n_samples):
             self.models[i].train()
 
@@ -442,10 +445,10 @@ class FoamSVGD():
             ndata = len(self.trainingLoader.dataset)
             if (epoch + 1) % 1 == 0:
                 self.lg.log("===> Epoch: {}, Current loss: {:.6f} Log Beta: {:.6f} Scaled-MSE: {:.6f}".format(
-                    epoch + 1, training_loss, self.models[0].log_beta.data.item(), training_MSE/(ndata*y_data.shape[1])))
+                    epoch + 1, training_loss, self.models[0].log_beta.data.item(), training_MSE/(ndata)))
                 self.lg.logLoss(epoch, training_loss/(ndata*self.n_samples), \
-                    training_MNLL/(ndata*self.n_samples), training_MSE/ndata)
-            
+                    training_MNLL/(ndata*self.n_samples), training_MSE/ndata, self.extra)
+            if(training_MSE/ndata < 0.0001): break 
 
  
     def test(self, epoch, gpu=True):
@@ -461,19 +464,12 @@ class FoamSVGD():
             self.lg.error('Testing data loader not created! Stopping testing')
             return
                   
-        # Unique indexs of the symmetric deviatoric tensor
-        #indx = Variable(th.LongTensor([0,1,2,4,5,8]), requires_grad=False)
-        #if (gpu):
-        #    indx = indx.cuda()
-
-        # Switch models to eval state (shuts off dropout)
         for i in range(self.n_samples):
             self.models[i].eval()
 
         # Mini-batch the training set
         flow_mspe = np.zeros(len(self.testingLoaders))
         flow_mnll = np.zeros(len(self.testingLoaders))
-        #print("flow_mnll shape ", flow_mnll.shape)
         for n, testingLoader in enumerate(self.testingLoaders):
             net_mse = 0
             testing_MNLL = 0
@@ -481,13 +477,9 @@ class FoamSVGD():
                 #self.lg.info("Testing batch " + str(batch_idx))
                 # Make mini-batch data variables
                 x_data = Variable(x_data)
-                #t_data = Variable(t_data, requires_grad=False)
-                #k_data = Variable(k_data.unsqueeze(0).unsqueeze(0).expand(3,3,k_data.size()[0]).permute(2, 0, 1).type(dtype), requires_grad=False)
                 y_data = Variable(y_data, requires_grad=False)
                 if (gpu):
                     x_data = x_data.cuda()
-                    #t_data = t_data.cuda()
-                    #k_data = k_data.cuda()
                     y_data = y_data.cuda()
 
                 b_pred = Variable(th.Tensor(
@@ -497,17 +489,11 @@ class FoamSVGD():
                 for i in range(self.n_samples):
                     self.models[i].zero_grad()
                     g_pred = self.models[i].forward(x_data)
-                    #g_pred0 = th.unsqueeze(th.unsqueeze(g_pred, 2), 3)
-                    #b_pred[i] = th.sum(g_pred0[:,:,:,:]*t_data[:,:,:,:],1).view(-1,9)
                     b_pred[i] = g_pred
-                    # For the loss since matrix is symmetric only select unique indices
                     loss, log_likelihood = self.compute_loss(b_pred[i], y_data, i)
                     testing_MNLL += log_likelihood
 
-                # MSE of unscaled anisotropic tensor a = k*b
-                # This is used as a metric since a is used in the RANS equations
-                # Thus measuring the MSE of b would be bias
-                mse = ((y_data - b_pred) ** 2).sum()
+                mse = ((y_data - b_pred.mean(0)) ** 2).sum()
                 net_mse += mse.data.item()
 
             # Total amount of testing data
@@ -518,7 +504,7 @@ class FoamSVGD():
         # Log testing results
         self.lg.log("===> Current Total Validation Loss: {}, Validation MSE: {}" \
                 .format(flow_mnll.sum(0)/ndata,flow_mspe.sum(0)))
-        self.lg.logTest(epoch, flow_mnll, flow_mspe)
+        self.lg.logTest(epoch, flow_mnll, flow_mspe, self.extra)
         return b_pred
 
     def predict2(self, trainS=True, gpu=True):

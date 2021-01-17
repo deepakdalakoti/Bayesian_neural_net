@@ -78,12 +78,14 @@ class Log():
                 f.write(base_str+output_type+str0+'\n')
 
     # Utils for saving stats to file
-    def logTest(self, epoch, testMNLL, testMSE):
-        with open('torchLogs/testErr'+uid.moment+'.dat', 'a') as f:
-            f.write('{},\t{}{}\n'.format(epoch, ''.join("{:.6f},\t".format(x) for x in testMNLL), ''.join("{:.6f},\t".format(x) for x in testMSE)))
+    def logTest(self, epoch, testMNLL, testMSE, extra = ""):
+        with open('torchLogs/testErr'+extra+'.dat', 'a') as f:
+            #f.write('{},\t{}{}\n'.format(epoch, ''.join("{:.6f},\t".format(x) for x in testMNLL), ''.join("{:.6f},\t".format(x) for x in testMSE)))
+            f.write('{},\t{:.6f},\t{:.6f}\n'.format(epoch, testMNLL[0], testMSE[0]))
 
-    def logLoss(self, epoch, loss, trainingMNLL, trainingMSE):
-        with open('torchLogs/loss'+uid.moment+'.dat', 'a') as f:
+    def logLoss(self, epoch, loss, trainingMNLL, trainingMSE, extra = ""):
+        #with open('torchLogs/loss'+uid.moment+err+'.dat', 'a') as f:
+        with open('torchLogs/loss'+extra+'.dat', 'a') as f:
             f.write('{},\t{:.6f},\t{:.6f},\t{:.6f}\n'.format(epoch, loss, trainingMNLL, trainingMSE))
 
     # Print iterations progress
