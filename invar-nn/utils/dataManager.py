@@ -16,7 +16,7 @@ from fluid.invariant import Invariant
 import sys, random, re, os
 import torch as th
 import numpy as np
-
+import pandas as pd
 # Default tensor type
 dtype = th.DoubleTensor
 
@@ -151,8 +151,8 @@ class DataManager():
     def getDataPoints2D(self,fnameX,fnameY,stp):
         #dataT = self.read_data(fnameX,56)
         #reacT = self.read_reaction(fnameY)
-        dataT = np.loadtxt(fnameX)
-        reacT = np.loadtxt(fnameY)
+        dataT = pd.read_csv(fnameX).to_numpy()
+        reacT = pd.read_csv(fnameY).to_numpy()
         #return dataT[0:-1:stp,2:55], reacT[0:-1:stp,2:54]
         return dataT, reacT
 

@@ -27,6 +27,9 @@ import torch as th
 import nn.nnUtils as nnUtils
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+import sys
+from sklearn.metrics import roc_auc_score
+from math import ceil
 # Default tensor datatype
 if th.cuda.is_available():
     dtype = th.cuda.DoubleTensor
@@ -50,11 +53,11 @@ class FoamSVGD():
         self.lg.info('Constructing neural network...')
 
         self.n_samples = n_samples # Number of SVGD particles
-        self.turb_nn = TurbNN(D_in=9, H=H, D_out=9).double() #Construct neural network        
+        self.turb_nn = TurbNN(D_in=36, H=H, D_out=1).double() #Construct neural network        
 
         # Student's t-distribution: w ~ St(w | mu=0, lambda=shape/rate, nu=2*shape)
         # See PRML by Bishop Page 103
-        self.prior_w_shape = 1.0
+        self.prior_w_shape = 2.0
         self.prior_w_rate = 0.02
         #self.prior_w_rate = 0.5
 
@@ -98,8 +101,7 @@ class FoamSVGD():
         self.optimizers = []
         for i in range(n_samples):
             # Pre-pend output-wise noise to model parameter list
-            parameters = [{'params': [self.models[i].log_beta], 'lr': self.lr_noise},
-                  {'params': [p for n, p in self.models[i].named_parameters() if n!='log_beta']}]
+            parameters = [{'params': [p for n, p in self.models[i].named_parameters() if n!='log_beta']}]
 
             #parameters = [{'params': [p for n, p in self.models[i].named_parameters() if n!='log_beta']}]
 
@@ -154,11 +156,22 @@ class FoamSVGD():
         else:
             # Log Gaussian likelihood 
             # See Eq. 18-19 in paper
-            log_likelihood = len(self.trainingLoader.dataset) / output.size(0) \
-                                * (-0.5 * self.models[index].log_beta.exp()
-                                * (target - output).pow(2).sum()
-                                + 0.5 * target.numel()
-                                * self.models[index].log_beta)
+            output = th.maximum(output, th.zeros(output.size(0))+1e-5)
+            output = th.minimum(output, th.ones(output.size(0))-0.0001)
+            log_likelihood = len(self.trainingLoader.dataset)/ output.size(0)\
+                            *th.sum(target*th.log(output) + (1.0-target)*th.log(1.0-output))
+            if(th.isnan(log_likelihood)):
+                    print(th.max(output), th.min(output))
+                    print(output)
+                    #print(target)
+                    print(self.models[index].linear7.weight.data)
+                    sys.exit("REACHED NAN")
+
+            #log_likelihood = len(self.trainingLoader.dataset) / output.size(0) \
+            #                    * (-0.5 * self.models[index].log_beta.exp()
+            #                    * (target - output).pow(2).sum()
+            #                    + 0.5 * target.numel()
+            #                    * self.models[index].log_beta)
 
             #log_likelihood =    (-0.5 * self.models[index].log_beta.exp()
             #                    * (target - output).pow(2).sum()
@@ -167,6 +180,7 @@ class FoamSVGD():
 
             # Log Gaussian weight prior
             # See Eq. 17 in paper
+            #print(log_likelihood, th.min(output), th.max(output))
             prior_ws = Variable(th.Tensor([0]).type(dtype))
             for param in self.models[index].parameters():
                 prior_ws += th.log1p(0.5 / self.prior_w_rate * param.pow(2)).sum()
@@ -177,8 +191,9 @@ class FoamSVGD():
             prior_log_beta = ((self.prior_beta_shape-1.0) * self.models[index].log_beta \
                         - self.models[index].log_beta.exp() * self.prior_beta_rate).sum()
 
-            return log_likelihood + prior_ws + prior_log_beta, \
+            return log_likelihood + prior_ws, \
                    log_likelihood.data.item()
+                    #+ prior_log_beta, \
 
     def compute_loss2(self, output, target, index=None):
 
@@ -254,6 +269,9 @@ class FoamSVGD():
 
         #self.lg.warning('Starting NN training with a experiment size of '+str(self.n_data))
         # store the joint probabilities
+        nbatches = ceil(len(self.trainingLoader.dataset)/self.trainingLoader.batch_size)
+        results = np.zeros((len(self.trainingLoader.dataset),1))
+        ytrue = np.zeros((len(self.trainingLoader.dataset),1))
         for epoch in range(n_epoch):
 
             if (epoch + 1) % 20 == 0:
@@ -263,6 +281,8 @@ class FoamSVGD():
             training_loss = 0.
             training_MNLL = 0.
             training_MSE = 0.
+            st=0
+            en=0
             # Mini-batch the training set
             for batch_idx, (x_data, y_data) in enumerate(self.trainingLoader):
                 x_data = Variable(x_data)
@@ -320,22 +340,27 @@ class FoamSVGD():
                 del grad_theta
 
                 # Scaled MSE
-                training_MSE += ((y_data - b_pred_tensor.mean(0)) ** 2).sum(1).sum(0).data.item()
+                #training_MSE += ((y_data - b_pred_tensor.mean(0)) ** 2).sum(1).sum(0).data.item()
+                en = en+y_data.shape[0]
+                results[st:en] = b_pred_tensor.mean(0).detach().numpy()
+                ytrue[st:en] = y_data.detach().numpy()
+                st = st+y_data.shape[0]
+                
                 # Mini-batch progress log
                 if ((batch_idx+1) % 500 == 0):
                     self.lg.log('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}\tNoise: {:.3f}'.format(
                     epoch, batch_idx * len(x_data), len(self.trainingLoader.dataset),
                     100. * batch_idx * len(x_data) / len(self.trainingLoader.dataset),
-                    loss.data.item(), self.models[0].log_beta.data.item()))
+                    roc_score, self.models[0].log_beta.data.item()))
 
             # Log training loss, MNLL, and mean mse
             ndata = len(self.trainingLoader.dataset)
-
+            score = roc_auc_score(ytrue, results)
             if (epoch + 1) % 1 == 0:
-                self.lg.log("===> Epoch: {}, Current loss: {:.6f} Log Beta: {:.6f} Scaled-MSE: {:.6f}".format(
-                    epoch + 1, training_loss, self.models[0].log_beta.data.item(), training_MSE/(ndata)))
+                self.lg.log("===> Epoch: {}, Current loss: {:.6f}  ROC_AUC: {:.6f}".format(
+                    epoch + 1, training_loss, score))
                 self.lg.logLoss(epoch, training_loss/(ndata*self.n_samples), \
-                    training_MNLL/(ndata*self.n_samples), training_MSE/ndata, self.extra)
+                    training_MNLL/(ndata*self.n_samples), score, self.extra)
             
             # Update learning rate if needed
             for i in range(self.n_samples):
@@ -471,8 +496,14 @@ class FoamSVGD():
         flow_mspe = np.zeros(len(self.testingLoaders))
         flow_mnll = np.zeros(len(self.testingLoaders))
         for n, testingLoader in enumerate(self.testingLoaders):
-            net_mse = 0
+
+            ytrue = np.zeros((len(testingLoader.dataset),1))
+            results = np.zeros((len(testingLoader.dataset),1))
+
+            testing_loss = 0
             testing_MNLL = 0
+            st=0
+            en=0
             for batch_idx, (x_data, y_data) in enumerate(testingLoader):
                 #self.lg.info("Testing batch " + str(batch_idx))
                 # Make mini-batch data variables
@@ -492,19 +523,21 @@ class FoamSVGD():
                     b_pred[i] = g_pred
                     loss, log_likelihood = self.compute_loss(b_pred[i], y_data, i)
                     testing_MNLL += log_likelihood
+                    testing_loss += loss.data.item()
 
-                mse = ((y_data - b_pred.mean(0)) ** 2).sum()
-                net_mse += mse.data.item()
-
+                en = en+y_data.shape[0]
+                results[st:en] = b_pred.mean(0).detach().numpy()
+                ytrue[st:en] = y_data.detach().numpy()
+                st = st+y_data.shape[0]
+ 
             # Total amount of testing data
             ndata = len(self.testingLoaders[n].dataset)
-            flow_mspe[n] = net_mse/(ndata)
             flow_mnll[n] = testing_MNLL/(ndata*self.n_samples)
-
+        score = roc_auc_score(ytrue, results)
         # Log testing results
         self.lg.log("===> Current Total Validation Loss: {}, Validation MSE: {}" \
-                .format(flow_mnll.sum(0)/ndata,flow_mspe.sum(0)))
-        self.lg.logTest(epoch, flow_mnll, flow_mspe, self.extra)
+                .format(testing_loss,score))
+        self.lg.logTest(epoch, flow_mnll, score, self.extra)
         return b_pred
 
     def predict2(self, trainS=True, gpu=True):
@@ -709,7 +742,7 @@ class FoamSVGD():
         #cns = x_train[0,0]
         #cns2 = x_test[0,0]
         x_train, x_test = dataManager.do_normalization(x_train, x_test, 'std')
-        y_train, y_test = dataManager.do_normalization(y_train, y_test, 'std')
+        #y_train, y_test = dataManager.do_normalization(y_train, y_test, 'std')
         #x_train[:,0] = cns
         #x_train[:,1] = 0.0
 

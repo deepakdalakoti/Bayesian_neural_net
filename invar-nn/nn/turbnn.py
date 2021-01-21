@@ -42,7 +42,7 @@ class TurbNN(th.nn.Module):
         self.linear6 = th.nn.Linear(H, H)
         self.f6 = th.nn.LeakyReLU()
         self.linear7 = th.nn.Linear(H, D_out)
-
+        self.f7 = th.nn.Sigmoid()
     def forward(self, x):
         """
         Forward pass of the neural network
@@ -57,8 +57,8 @@ class TurbNN(th.nn.Module):
         lin4 = self.f4(self.linear4(lin1))
         lin5 = self.f5(self.linear5(lin4))
         lin6 = self.f6(self.linear6(lin5))
-        out = self.linear7(lin6)
-        return out
+        out  = self.linear7(lin6)
+        return self.f7(out)
 
     def reset_parameters2(self):
         """

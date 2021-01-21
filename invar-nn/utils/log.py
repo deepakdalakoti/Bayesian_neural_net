@@ -81,7 +81,7 @@ class Log():
     def logTest(self, epoch, testMNLL, testMSE, extra = ""):
         with open('torchLogs/testErr'+extra+'.dat', 'a') as f:
             #f.write('{},\t{}{}\n'.format(epoch, ''.join("{:.6f},\t".format(x) for x in testMNLL), ''.join("{:.6f},\t".format(x) for x in testMSE)))
-            f.write('{},\t{:.6f},\t{:.6f}\n'.format(epoch, testMNLL[0], testMSE[0]))
+            f.write('{},\t{:.6f},\t{:.6f}\n'.format(epoch, testMNLL[0], testMSE))
 
     def logLoss(self, epoch, loss, trainingMNLL, trainingMSE, extra = ""):
         #with open('torchLogs/loss'+uid.moment+err+'.dat', 'a') as f:
