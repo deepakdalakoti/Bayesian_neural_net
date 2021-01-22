@@ -39,8 +39,8 @@ class TurbNN(th.nn.Module):
         self.f4 = th.nn.LeakyReLU()
         self.linear5 = th.nn.Linear(H, H)
         self.f5 = th.nn.LeakyReLU()
-        self.linear6 = th.nn.Linear(H, H)
-        self.f6 = th.nn.LeakyReLU()
+        #self.linear6 = th.nn.Linear(H, H)
+        #self.f6 = th.nn.LeakyReLU()
         self.linear7 = th.nn.Linear(H, D_out)
         self.f7 = th.nn.Sigmoid()
     def forward(self, x):
@@ -56,8 +56,8 @@ class TurbNN(th.nn.Module):
         #lin3 = self.f3(self.linear3(lin2))
         lin4 = self.f4(self.linear4(lin1))
         lin5 = self.f5(self.linear5(lin4))
-        lin6 = self.f6(self.linear6(lin5))
-        out  = self.linear7(lin6)
+        #lin6 = self.f6(self.linear6(lin5))
+        out  = self.linear7(lin5)
         return self.f7(out)
 
     def reset_parameters2(self):

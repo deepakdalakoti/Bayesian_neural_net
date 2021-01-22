@@ -57,11 +57,11 @@ class FoamSVGD():
 
         # Student's t-distribution: w ~ St(w | mu=0, lambda=shape/rate, nu=2*shape)
         # See PRML by Bishop Page 103
-        self.prior_w_shape = 2.0
-        self.prior_w_rate = 0.02
-        #self.prior_w_rate = 0.5
+        self.prior_w_shape = 1.0
+        #self.prior_w_rate = 0.1
+        self.prior_w_rate = 0.5
 
-
+        # Not needed for classification, because labels have no noise
         # noise variance: beta ~ Gamma(beta | shape, rate)
         self.prior_beta_shape = 100
         #self.prior_beta_rate = 2e-4
@@ -81,34 +81,19 @@ class FoamSVGD():
         self.models = th.nn.ModuleList(instances)
         del instances
 
-
-
-        # Now set up parameters for the noise hyper-prior
-        beta_size = (self.n_samples, 1)
-        log_beta = np.log(np.random.gamma(self.prior_beta_shape,
-                        1. / self.prior_beta_rate, size=beta_size))
-        # Log of the additive output-wise noise (beta)
-        for i in range(n_samples):
-            self.models[i].log_beta = Parameter(th.Tensor(log_beta[i]).type(dtype))
-
         # Network weights learning weight
         self.lr = 1e-2
-        # Output-wise noise learning weight
-        self.lr_noise=0.01
 
         # Construct individual optimizers and learning rate schedulers
         self.schedulers = []
         self.optimizers = []
         for i in range(n_samples):
             # Pre-pend output-wise noise to model parameter list
-            parameters = [{'params': [p for n, p in self.models[i].named_parameters() if n!='log_beta']}]
-
-            #parameters = [{'params': [p for n, p in self.models[i].named_parameters() if n!='log_beta']}]
+            parameters = [{'params': [p for n, p in self.models[i].named_parameters() ]}]
 
             # ADAM optimizer (minor weight decay)
             optim = th.optim.Adam(parameters, lr=self.lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=0.0)
             #optim = th.optim.Adam(parameters, lr=lr)
-
 
             # Decay learning weight on plateau, can adjust these parameters depending on data
             scheduler = ReduceLROnPlateau(optim, mode='min', factor=0.75, patience=5,
@@ -154,55 +139,30 @@ class FoamSVGD():
             ValueError("model index should be in [0, ..., {}], but got {}"
                        .format(self.n_samples, index))
         else:
-            # Log Gaussian likelihood 
-            # See Eq. 18-19 in paper
-            output = th.maximum(output, th.zeros(output.size(0))+1e-5)
-            output = th.minimum(output, th.ones(output.size(0))-0.0001)
+            # Log likelihood of bernouli distribution for binary classification
+            # Similar to binary cross entropy
+            # small number add/sub for numerical consistency of log
+            output = th.maximum(output, th.zeros(output.size(0))+1e-6)
+            output = th.minimum(output, th.ones(output.size(0))-1e-6)
             log_likelihood = len(self.trainingLoader.dataset)/ output.size(0)\
                             *th.sum(target*th.log(output) + (1.0-target)*th.log(1.0-output))
-            if(th.isnan(log_likelihood)):
-                    print(th.max(output), th.min(output))
-                    print(output)
-                    #print(target)
-                    print(self.models[index].linear7.weight.data)
-                    sys.exit("REACHED NAN")
 
-            #log_likelihood = len(self.trainingLoader.dataset) / output.size(0) \
-            #                    * (-0.5 * self.models[index].log_beta.exp()
-            #                    * (target - output).pow(2).sum()
-            #                    + 0.5 * target.numel()
-            #                    * self.models[index].log_beta)
-
-            #log_likelihood =    (-0.5 * self.models[index].log_beta.exp()
-            #                    * (target - output).pow(2).sum()
-            #                    + 0.5 * target.numel()
-            #                    * self.models[index].log_beta)
+            #if(th.isnan(log_likelihood)):
+            #        print(th.max(output), th.min(output))
+            #        print(output)
+            #        print(self.models[index].linear7.weight.data)
+            #        sys.exit("REACHED NAN")
 
             # Log Gaussian weight prior
             # See Eq. 17 in paper
-            #print(log_likelihood, th.min(output), th.max(output))
             prior_ws = Variable(th.Tensor([0]).type(dtype))
             for param in self.models[index].parameters():
                 prior_ws += th.log1p(0.5 / self.prior_w_rate * param.pow(2)).sum()
             prior_ws *= -(self.prior_w_shape + 0.5)
 
-            # Log Gamma Output-wise noise prior
-            # See Eq. 20 in paper
-            prior_log_beta = ((self.prior_beta_shape-1.0) * self.models[index].log_beta \
-                        - self.models[index].log_beta.exp() * self.prior_beta_rate).sum()
-
             return log_likelihood + prior_ws, \
                    log_likelihood.data.item()
-                    #+ prior_log_beta, \
 
-    def compute_loss2(self, output, target, index=None):
-
-
-
-        log_likelihood =  (target - output).pow(2).sum()
-        return log_likelihood,   log_likelihood.data.item()
-
- 
     def _squared_dist(self, X):
         """
         Computes the square distance for a set of vectors ||x1 - x2||.
@@ -235,7 +195,8 @@ class FoamSVGD():
 
         triu_indices = squared_dist.triu(1).nonzero().transpose(0, 1)
         off_diag = squared_dist[triu_indices[0], triu_indices[1]]
-        l_square = 0.5 * off_diag.median() / self.n_samples
+        # Recommended value of l_square from the original stein variational paper
+        l_square = 0.5 * off_diag.median() / np.log(self.n_samples)
         Kxx = th.exp(-0.5 / l_square * squared_dist)
         # Matrix form for the second term of optimal functional gradient in eqn (8) of SVGD paper
         # This line needs S x P memory
@@ -269,7 +230,6 @@ class FoamSVGD():
 
         #self.lg.warning('Starting NN training with a experiment size of '+str(self.n_data))
         # store the joint probabilities
-        nbatches = ceil(len(self.trainingLoader.dataset)/self.trainingLoader.batch_size)
         results = np.zeros((len(self.trainingLoader.dataset),1))
         ytrue = np.zeros((len(self.trainingLoader.dataset),1))
         for epoch in range(n_epoch):
@@ -280,7 +240,6 @@ class FoamSVGD():
 
             training_loss = 0.
             training_MNLL = 0.
-            training_MSE = 0.
             st=0
             en=0
             # Mini-batch the training set
@@ -306,7 +265,6 @@ class FoamSVGD():
                     # Predict mixing coefficients -> g_pred [Nx10]
                     g_pred = self.models[i].forward(x_data)
                     b_pred_tensor[i] = g_pred
-                    #b_pred = g_pred
 
                     loss, log_likelihood = self.compute_loss(g_pred, y_data, i)
                     # backward to compute gradients of log joint probabilities
@@ -331,16 +289,15 @@ class FoamSVGD():
                 # Negate the gradients here
                 grad_theta = - (grad_logp + dxKxx) / self.n_samples
 
-
-
                 # update param gradients
                 for i in range(self.n_samples):
                     nnUtils.vector_to_parameters(grad_theta[i], self.models[i].parameters(), grad=True)
                     self.optimizers[i].step()
                 del grad_theta
 
-                # Scaled MSE
-                #training_MSE += ((y_data - b_pred_tensor.mean(0)) ** 2).sum(1).sum(0).data.item()
+                # ROC AUC of dataset
+                # Costly for large dataset, maybe use batch wise and normalise
+                # but fine for now
                 en = en+y_data.shape[0]
                 results[st:en] = b_pred_tensor.mean(0).detach().numpy()
                 ytrue[st:en] = y_data.detach().numpy()
@@ -351,7 +308,7 @@ class FoamSVGD():
                     self.lg.log('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}\tNoise: {:.3f}'.format(
                     epoch, batch_idx * len(x_data), len(self.trainingLoader.dataset),
                     100. * batch_idx * len(x_data) / len(self.trainingLoader.dataset),
-                    roc_score, self.models[0].log_beta.data.item()))
+                    roc_score, 0 ))
 
             # Log training loss, MNLL, and mean mse
             ndata = len(self.trainingLoader.dataset)
@@ -367,7 +324,11 @@ class FoamSVGD():
                 self.schedulers[i].step(abs(training_loss))
 
     def train2(self, x_dataTr, y_dataTr,  nb=1, n_epoch=1, gpu=True):
+       
         """
+        This version of train function can be used by passing training data
+        instead of training on preloaded data, otherwise same
+
         Training the neural network(s) using SVGD
         Args:
             n_epoch (int): Number of epochs to train for
@@ -395,6 +356,8 @@ class FoamSVGD():
         for i in range(self.n_samples):
             self.models[i].train()
 
+        results = np.zeros((len(self.trainingLoader.dataset),1))
+        ytrue = np.zeros((len(self.trainingLoader.dataset),1))
         for epoch in range(n_epoch):
 
             #if (epoch + 1) % 20 == 0:
@@ -404,6 +367,8 @@ class FoamSVGD():
             training_loss = 0.
             training_MNLL = 0.
             training_MSE = 0.
+            st=0
+            en=0
             for batch_idx, (x_data, y_data) in enumerate(self.trainingLoader):
                 # Mini-batch the training set
                 x_data = Variable(x_data)
@@ -427,7 +392,6 @@ class FoamSVGD():
                     # Predict mixing coefficients -> g_pred [Nx10]
                     g_pred = self.models[i].forward(x_data)
                     b_pred_tensor[i] = g_pred
-                    #b_pred = g_pred
 
                     loss, log_likelihood = self.compute_loss(g_pred, y_data, i)
                     # backward to compute gradients of log joint probabilities
@@ -452,28 +416,30 @@ class FoamSVGD():
                 # Negate the gradients here
                 grad_theta = - (grad_logp + dxKxx) / self.n_samples
 
-
-
                 # update param gradients
                 for i in range(self.n_samples):
                     nnUtils.vector_to_parameters(grad_theta[i], self.models[i].parameters(), grad=True)
                     self.optimizers[i].step()
                 del grad_theta
 
-                # Scaled MSE
-                training_MSE += ((y_data - b_pred_tensor.mean(0)) ** 2).sum(1).sum(0).data.item()
+                # ROC AUC of dataset
+                # Costly for large dataset, maybe use batch wise and normalise
+                # but fine for now
+                en = en+y_data.shape[0]
+                results[st:en] = b_pred_tensor.mean(0).detach().numpy()
+                ytrue[st:en] = y_data.detach().numpy()
+                st = st+y_data.shape[0]
 
             # Update learning rate if needed
             for i in range(self.n_samples):
                 self.schedulers[i].step(abs(training_loss))
-
+            score = roc_auc_score(ytrue, results)
             ndata = len(self.trainingLoader.dataset)
             if (epoch + 1) % 1 == 0:
-                self.lg.log("===> Epoch: {}, Current loss: {:.6f} Log Beta: {:.6f} Scaled-MSE: {:.6f}".format(
-                    epoch + 1, training_loss, self.models[0].log_beta.data.item(), training_MSE/(ndata)))
+                self.lg.log("===> Epoch: {}, Current loss: {:.6f}  ROC_AUC: {:.6f}".format(
+                    epoch + 1, training_loss,  score))
                 self.lg.logLoss(epoch, training_loss/(ndata*self.n_samples), \
-                    training_MNLL/(ndata*self.n_samples), training_MSE/ndata, self.extra)
-            if(training_MSE/ndata < 0.0001): break 
+                    training_MNLL/(ndata*self.n_samples), score, self.extra)
 
  
     def test(self, epoch, gpu=True):
@@ -539,180 +505,6 @@ class FoamSVGD():
                 .format(testing_loss,score))
         self.lg.logTest(epoch, flow_mnll, score, self.extra)
         return b_pred
-
-    def predict2(self, trainS=True, gpu=True):
-        """
-        Tests the neural network(s) on validation/testing datasets
-        Args:
-            n_epoch (int): current epoch (just used for logging purposes)
-            gpu (boolean): Whether or not to use a GPU (default is true)
-        """
-        try:
-            self.testingLoaders
-        except:
-            self.lg.error('Testing data loader not created! Stopping testing')
-            return
-                  
-
-        # Switch models to eval state (shuts off dropout)
-        for i in range(self.n_samples):
-            self.models[i].eval()
-        if(trainS):
-            y_data = self.trainingLoader.dataset.target_tensor
-            x_data = self.trainingLoader.dataset.x_tensor
-            b_mean = th.Tensor(x_data.shape[0],y_data.shape[1]).type(th.DoubleTensor)
-            b_var  = th.Tensor(x_data.shape[0],y_data.shape[1]).type(th.DoubleTensor)
-
-        else:
-            x_data = self.testingLoaders[0].dataset.x_tensor
-            y_data = self.testingLoaders[0].dataset.target_tensor
-            b_mean = th.Tensor(x_data.shape[0],y_data.shape[1]).type(th.DoubleTensor)
-            b_var  = th.Tensor(x_data.shape[0],y_data.shape[1]).type(th.DoubleTensor)
-
-        if(gpu):   
-            x_data = x_data.cuda()
-            #y_data = y_data.cuda() 
-
-        predict=Variable(th.Tensor(
-                    self.n_samples, x_data.size(0), y_data.shape[1]).type(dtype), requires_grad=False)
-
-
-        for i in range(self.n_samples):
-            predict[i] = self.models[i].forward(x_data)
-
-        eyyt = (predict.data ** 2).mean(0)
-        eyeyt = predict.mean(0).data ** 2
-        beta_inv = th.cat([(-self.models[i].log_beta.data).exp().unsqueeze(0) for i in range(self.n_samples)])
-        y_noise_var = beta_inv.mean(0)
-        var = eyyt.cpu() - eyeyt.cpu() 
-        var_noise =  y_noise_var.cpu()
-
-
-        meanPred = predict.mean(0)
-
-        return meanPred.cpu(), var, var_noise
-
-    def predict3(self, gpu=True):
-
-        # Switch models to eval state (shuts off dropout)
-        for i in range(self.n_samples):
-            self.models[i].eval()
-        
-        if(gpu):
-            self.lg.info('GPU network training enabled')
-            #Transfer network and training data onto GPU
-            for i in range(self.n_samples):
-                    self.models[i].cuda()
-        else:
-            self.lg.info('CPU network training enabled')
-
-        # Note we store the mean and variance fields on the CPU since the fluid field may be very larges
-        # Mini-batches are then brought onto the GPU from forward passes.
-        x_data = self.trainingLoader.dataset.x_tensor
-        b_mean = th.Tensor(x_data.size(0), 1).type(th.DoubleTensor)
-        targ = th.Tensor(x_data.size(0), 1).type(th.DoubleTensor)
-        b_var = th.Tensor(x_data.size(0), 1).type(th.DoubleTensor)
-        b_index = 0
-        # Mini-batch the pred
-        for batch_idx, (x_data, t_data) in enumerate(self.trainingLoader):
-            x_data = Variable(x_data, requires_grad=False)
-            t_data = Variable(t_data, requires_grad=False)
-            if (gpu):
-                x_data = x_data.cuda()
-                t_data = t_data.cuda()
-
-            b_pred = Variable(th.Tensor(
-                self.n_samples, x_data.size(0), 1).type(dtype))
-
-            # Now iterate through each model
-            for i in range(self.n_samples):
-                self.models[i].zero_grad()
-                g_pred = self.models[i].forward(x_data)
-                b_pred[i] = g_pred
-                
-            # Compute expectation (Eq. 30 in paper)
-            b_mean[b_index:b_index+x_data.size(0)] = b_pred.mean(0).data.cpu()
-            targ[b_index:b_index+x_data.size(0)] = t_data
-            # Compute variance of each output  (Eq. 31 in paper)
-            b_eyyt = (b_pred.data ** 2).mean(0)
-            b_eyeyt = b_pred.mean(0).data ** 2
-            beta_inv = th.cat([(-self.models[i].log_beta.data).exp().unsqueeze(0) for i in range(self.n_samples)])
-            y_noise_var = beta_inv.mean(0).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
-            b_var[b_index:b_index+x_data.size(0)] = b_eyyt.cpu() - b_eyeyt.cpu() + y_noise_var.cpu()
-            # Step index
-            b_index += x_data.size(0)
-
-        return b_mean, targ
-
-
-    def predict(self, ransS, ransR, n_mb=200, gpu=True):
-        """
-        Method for obtaining mean and variance predictions for a given flow [depreciated]
-        (Un-used during training/ testing but left in for reference)
-        Args:
-            ransS (Tensor): [nCellx3x3] Baseline RANS rate-of-strain tensor
-            ransS (Tensor): [nCellx3x3] Baseline RANS rotation tensor
-        """
-        # Get invariants and tensor functions for the provided field
-        fl = Invariant()
-        x_data = fl.getInvariants(ransS, ransR)
-        t_data  = fl.getTensorFunctions(ransS, ransR)
-        # Create data loader
-        predictionLoader = th.utils.data.DataLoader(PredictDataset(x_data, t_data), batch_size=n_mb, shuffle=False)
-
-        # Switch models to eval state (shuts off dropout)
-        for i in range(self.n_samples):
-            self.models[i].eval()
-        
-        if(gpu):
-            self.lg.info('GPU network training enabled')
-            #Transfer network and training data onto GPU
-            for i in range(self.n_samples):
-                    self.models[i].cuda()
-        else:
-            self.lg.info('CPU network training enabled')
-
-        # Note we store the mean and variance fields on the CPU since the fluid field may be very larges
-        # Mini-batches are then brought onto the GPU from forward passes.
-        out_size = (3,3)
-        b_mean = th.Tensor(x_data.size(0), *out_size).type(th.DoubleTensor)
-        b_var = th.Tensor(x_data.size(0), *out_size).type(th.DoubleTensor)
-        b_index = 0
-        # Mini-batch the pred
-        for batch_idx, (x_data, t_data) in enumerate(predictionLoader):
-            x_data = Variable(x_data, requires_grad=False)
-            t_data = Variable(t_data, requires_grad=False)
-            if (gpu):
-                x_data = x_data.cuda()
-                t_data = t_data.cuda()
-
-            b_pred = Variable(th.Tensor(
-                self.n_samples, x_data.size(0), *out_size).type(dtype))
-
-            # Now iterate through each model
-            for i in range(self.n_samples):
-                self.models[i].zero_grad()
-                g_pred = self.models[i].forward(x_data)
-                g_pred0 = th.unsqueeze(th.unsqueeze(g_pred, 2), 3)
-                b_pred[i] = th.sum(g_pred0[:,:,:,:]*t_data[:,:,:,:],1)
-                
-            # Compute expectation (Eq. 30 in paper)
-            b_mean[b_index:b_index+x_data.size(0)] = b_pred.mean(0).data.cpu()
-            # Compute variance of each output  (Eq. 31 in paper)
-            b_eyyt = (b_pred.data ** 2).mean(0)
-            b_eyeyt = b_pred.mean(0).data ** 2
-            beta_inv = th.cat([(-self.models[i].log_beta.data).exp().unsqueeze(0) for i in range(self.n_samples)])
-            y_noise_var = beta_inv.mean(0).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
-            b_var[b_index:b_index+x_data.size(0)] = b_eyyt.cpu() - b_eyeyt.cpu() + y_noise_var.cpu()
-            # Step index
-            b_index += x_data.size(0)
-
-            if ((batch_idx+1) % 50 == 0):
-                self.lg.log('Mini-batching predictive field. [{}/{} ({:.0f}%)]'.format(
-                    batch_idx * len(x_data), len(predictionLoader.dataset),
-                    100. * batch_idx * len(x_data) / len(predictionLoader.dataset)))
-
-        return b_mean, b_var
 
     def getDataPoints(self, dataManager, XTrdirs, YTrdirs, Xdirs, Ydirs, stp=10, n_mb = 250):
         """ 

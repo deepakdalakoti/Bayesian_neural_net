@@ -16,13 +16,8 @@ if __name__ == '__main__':
 
     lg = Log()
 
-    # Define data location and timesteps
-    trainingDir = ['rans-uncertainity/training-data/converge-diverge']
-    trainingDir = [os.path.join(os.getcwd(), dir0) for dir0 in trainingDir]
-    ransTimes = [60, 90, 60, 60, 60]
-    lesTimes = [200, 1000, 250, 1700, 170]
-    dataManager = DataManager(trainingDir, ransTimes, lesTimes)
-    nsamples = 10
+    dataManager = DataManager()
+    nsamples = 50
     foamNN = FoamSVGD(nsamples, 16) # Number of SVGD particles
     # Load pre-trained neural networks
     #foamNN.loadNeuralNet('./torchNets/foamNet')
@@ -35,7 +30,7 @@ if __name__ == '__main__':
     Xdirs  = [dirs+'deepak_X_test_data.csv']
     Ydirs  = [dirs+'deepak_y_test_data.csv']
 
-    n_mb=32
+    n_mb=64
     foamNN.getDataPoints(dataManager, XTdirs, YTdirs, Xdirs, Ydirs, stp=2, n_mb=n_mb)
 
     lg.log('Batch size is ' + str(n_mb))
@@ -44,8 +39,8 @@ if __name__ == '__main__':
     n_mb = [1024 for i in range(n)] # Mini-batch size
     n_epoch = [100 for i in range(n)] # Number of epochs per training set
 
-    foamNN.extra = "-" + str(foamNN.prior_w_shape) + "-" + str(foamNN.prior_w_rate) + "-lr-" + str(foamNN.lr) + "-" \
-                    + str(foamNN.lr_noise) + "-bs-" +  str(foamNN.n_mb) + "-" + str(nsamples) + "-64neu-Vode"
+    foamNN.extra = "-" + str(foamNN.prior_w_shape) + "-" + str(foamNN.prior_w_rate) + "-lr-" + str(foamNN.lr)  \
+                 + "-bs-" +  str(foamNN.n_mb) + "-" + str(nsamples) + "-64neu-Vode"
 
 
     # Training loop
